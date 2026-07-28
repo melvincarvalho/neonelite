@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+CHROME="${CHROME:-chromium}"
+SHOTS=(title space duel battle dock market equip map status jump dead)
+for s in "${SHOTS[@]}"; do
+  "$CHROME" --headless=new --disable-gpu --hide-scrollbars \
+    --force-device-scale-factor=2 --window-size=1280,720 \
+    --virtual-time-budget=60000 \
+    --screenshot="$DIR/shots/$s.png" \
+    "file://$DIR/index.html?shot=$s" 2>/dev/null
+  echo "captured $s"
+done
