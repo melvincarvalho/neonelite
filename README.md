@@ -43,10 +43,10 @@ but a whole career, replayed and verified headlessly every build.
 `tools/playtest.sh` proves 17 claims:
 
 - **the trader bot must get rich by reading the economy**: price-driven
-  routes and honest roll-matched dockings turned 100 cr into 2,474 cr
-  across 6 legs (+396/leg);
-- **a random commander must NOT get rich** — the null trader bled to
-  1 cr and died to pirates mid-voyage;
+  routes and honest roll-matched dockings turned 100 cr into 2,581 cr
+  across 6 legs (+414/leg);
+- **a random commander must NOT get rich** — the null trader limped to
+  13 cr — poorer than launch day after refuels;
 - **ablate-economy** (smart routes, blind cargo picks) **died broke
   with a hold full of worthless goods** — reading prices is
   load-bearing;
