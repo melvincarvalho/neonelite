@@ -136,11 +136,16 @@ function genGalaxy() {
   }
   for (const s of GALAXY) { s.x = clamp(s.x, 15, 485); s.y = clamp(s.y, 15, 305); }
 }
+function hash32(str, seed) {
+  let h = seed >>> 0;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 2654435761); h ^= h >>> 15; }
+  return (h >>> 0) / 4294967296;
+}
 function priceOf(good, sys) {
-  // agricultural worlds sell food cheap and buy machinery dear; industry inverts it
-  const swing = good.eco * (sys.economy - 0.5) * 2;    // -eco..+eco
-  srand(sys.seed ^ (good.name.length * 2654435761));
-  const jitter = rng(-0.08, 0.08);
+  // agricultural worlds sell food cheap and buy machinery dear; industry inverts it.
+  // Pure stateless hash: the market never touches the simulation's RNG stream.
+  const swing = good.eco * (sys.economy - 0.5) * 2;
+  const jitter = (hash32(good.name, sys.seed) - 0.5) * 0.16;
   return Math.max(2, Math.round(good.base * (1 - swing * 0.45 + jitter)));
 }
 function distLY(a, b) { return Math.hypot(a.x - b.x, a.y - b.y) / 28; }   // map units -> light years
@@ -229,6 +234,7 @@ function cargoTons() { let n = 0; for (const k in G.cargo) n += G.cargo[k]; retu
 // ---------- launch / spaceflight world ----------
 function launch() {
   if (G.mode !== 'docked') return;
+  G.msg = [];
   const s = sys();
   srand(s.seed ^ 0x5AFE);
   G.mode = 'flight';
@@ -312,7 +318,7 @@ function simFlight(dt) {
     // through the slot: laterally inside it, roll matched to the spin,
     // flying inward through the FRONT (+z) face
     const entryOk = lat < 95 && dAng < 0.3 && G.fwd[2] < -0.65 && toSt[2] > -30;
-    if (entryOk || G.hasDockComp) {
+    if (entryOk) {
       dockNow();
       return;
     }
@@ -336,6 +342,7 @@ function simFlight(dt) {
   }
 }
 function dockNow() {
+  G.msg = [];
   G.mode = 'docked';
   G.screen = 'status';
   G.stats.docks++;
@@ -346,10 +353,13 @@ function dockNow() {
   G.log.push({ ev: 'dock', sys: G.sysId, cr: G.credits, t: Math.round(G.time) });
 }
 function die(why) {
-  G.mode = 'dead';
+  if (G.mode === 'dead' || G.mode === 'dying') return;
+  G.mode = 'dying';
   G.modeT = 0;
-  SFX.fail();
-  say(why);
+  G.deathWhy = why;
+  G.shake = 10;
+  addBurst(G.pos, '#33d6ff');
+  SFX.boom();
 }
 function startJump(target) {
   const d = distLY(sys(), GALAXY[target]);
@@ -383,6 +393,7 @@ function doJump() {
 function fireLaser() {
   if (G.mode !== 'flight' || G.laserHeat > 92) return false;
   G.laserHeat += 9;
+  G.lastHitPoint = null;
   SFX.laser();
   // instant beam down +fwd: hit the nearest ship within a narrow cone
   let best = null, bd = 1e9;
@@ -396,6 +407,10 @@ function fireLaser() {
   }
   G.boltFlashT = 0.07;
   if (best) {
+    G.lastHitPoint = [...best.pos];
+    for (let i = 0; i < 6; i++) {
+      G.parts.push({ pos: [...best.pos], vel: mul3(norm3(v3(rng(-1, 1), rng(-1, 1), rng(-1, 1))), rng(40, 160)), color: '#ffd12a', life: rng(0.15, 0.35), t: 0 });
+    }
     best.hp -= 8 + (rand() < 0.2 ? 6 : 0);
     best.hostile = true;
     if (best.type === 'mule') bumpWanted(1);
@@ -418,7 +433,19 @@ function bumpWanted(n) {
 function killShip(sh) {
   sh.dead = true;
   SFX.boom();
-  addBurst(sh.pos, sh.type === 'jackal' ? '#ff2e6d' : sh.type === 'warden' ? '#5fd4ff' : '#c9a06b');
+  const col2 = sh.type === 'jackal' ? '#ff2e6d' : sh.type === 'warden' ? '#5fd4ff' : '#c9a06b';
+  addBurst(sh.pos, col2);
+  // the hull comes apart into tumbling edges (canon died this way)
+  const hd = HULLS[sh.type];
+  for (const [a2, b2] of hd.edges) {
+    G.parts.push({
+      kind: 'edge', pos: [...sh.pos],
+      a: [...hd.pts[a2]], b: [...hd.pts[b2]],
+      vel: mul3(norm3(v3(rng(-1, 1), rng(-1, 1), rng(-1, 1))), rng(20, 90)),
+      spin: rng(-3, 3), ang: rng(0, 6.28),
+      color: col2, life: rng(1.2, 2.2), t: 0,
+    });
+  }
   if (sh.type === 'jackal') {
     const bounty = 18 + (rand() * 22 | 0);
     G.credits += bounty;
@@ -433,6 +460,7 @@ function killShip(sh) {
     bumpWanted(3);
     say('A Warden falls. They will not forget.');
   } else {
+    G.kills++;
     bumpWanted(2);
     say('The trader breaks apart. Piracy suits you.');
   }
@@ -472,13 +500,10 @@ function simShips(dt) {
       sh.fwd = norm3(add3(mul3(sh.fwd, 1 - agility), mul3(dir, agility)));
       sh.fireT -= dt;
       const facing = dot3(sh.fwd, dir);
-      G.dbgFacing = Math.round(facing * 100) / 100; G.dbgD = Math.round(d);
       if (sh.fireT <= 0 && ((d < 3200 && facing > 0.94) || (d < 900 && facing > 0.7) || d < 250)) {
-        G.dbgShots = (G.dbgShots || 0) + 1;
         sh.fireT = rng(0.9, 1.7);
-        // they hit our fore or aft shield depending on geometry
-        const fromFront = dot3(norm3(sub3(sh.pos, G.pos)), G.fwd) > 0;
-        damageUs(rng(6, 13), fromFront);
+        // a visible bolt crosses the void; it lands where you were
+        G.bolts.push({ kind: 'enemy', pos: [...sh.pos], aim: [...G.pos], speed: 1500, life: 4, dmg: rng(6, 13), from: [...sh.pos] });
       }
     } else if (sh.type === 'mule' && sh.hostile) {
       const dir = norm3(sub3(sh.pos, G.pos));
@@ -493,9 +518,6 @@ function simShips(dt) {
   }
 }
 function damageUs(dmg, front) {
-  G.dbgDmg = (G.dbgDmg || 0) + dmg;
-  G.dbgMinSF = Math.min(G.dbgMinSF === undefined ? 100 : G.dbgMinSF, G.shieldF);
-  G.dbgMinSA = Math.min(G.dbgMinSA === undefined ? 100 : G.dbgMinSA, G.shieldA);
   SFX.hitUs();
   G.shake = Math.max(G.shake, 5);
   G.flashT = 0.22;
@@ -517,6 +539,21 @@ function simBolts(dt) {
   for (const b of [...G.bolts]) {
     b.life -= dt;
     if (b.life <= 0) { G.bolts.splice(G.bolts.indexOf(b), 1); continue; }
+    if (b.kind === 'enemy') {
+      const dir = norm3(sub3(b.aim, b.pos));
+      b.pos = add3(b.pos, mul3(dir, b.speed * dt));
+      if (len3(sub3(b.aim, b.pos)) < 70) {
+        // arrived at the aim point: did we stay to receive it?
+        if (len3(sub3(G.pos, b.pos)) < 110) {
+          const rel = norm3(sub3(b.from, G.pos));
+          const fromFront = dot3(rel, G.fwd) > 0;
+          G.hitDir = [dot3(rel, G.right), dot3(rel, G.up)];
+          damageUs(b.dmg, fromFront);
+        }
+        G.bolts.splice(G.bolts.indexOf(b), 1);
+      }
+      continue;
+    }
     if (b.kind === 'missile') {
       const t = G.ships.find(s => s.id === b.target && !s.dead);
       if (!t) { G.bolts.splice(G.bolts.indexOf(b), 1); continue; }
@@ -597,15 +634,31 @@ function sim(dt) {
     if (p.t >= p.life) { G.parts.splice(G.parts.indexOf(p), 1); continue; }
     p.pos = add3(p.pos, mul3(p.vel, dt));
   }
+  if (G.mode === 'dying') {
+    // the ship tumbles; the stars keep going
+    applyPitchRoll(0.7, 2.4, dt);
+    G.speed *= 1 - dt * 0.5;
+    G.pos = add3(G.pos, mul3(G.fwd, G.speed * dt));
+    if (G.modeT > 1.6) { G.mode = 'dead'; G.modeT = 0; SFX.fail(); }
+    return;
+  }
   if (G.mode === 'flight') {
     simFlight(dt);
-    // docking computer: fly us in
+    // docking computer: it flies the true approach — axis first, then roll-match
     if (G.hasDockComp && G.autoDockT > 0) {
       G.autoDockT -= dt;
-      const dir = norm3(sub3(G.station.pos, G.pos));
-      G.fwd = norm3(add3(mul3(G.fwd, 0.94), mul3(dir, 0.06)));
-      G.up = norm3(cross3(cross3(G.fwd, G.up), G.fwd));
-      G.throttle = 0.5;
+      const toSt2 = sub3(G.pos, G.station.pos);
+      if (toSt2[2] < 200 && Math.hypot(toSt2[0], toSt2[1]) > 220) {
+        // wrong side: swing wide to the slot face
+        steerToward(add3(G.station.pos, v3(0, 0, 1500)), dt);
+        G.throttle = 0.6;
+      } else if (toSt2[2] > 320) {
+        steerToward(G.station.pos, dt);
+        G.throttle = 0.4;
+      } else {
+        steerToward(G.station.pos, dt, G.station.spin);
+        G.throttle = 0.2;
+      }
     }
   }
 }
@@ -642,19 +695,37 @@ function drawScene() {
   ctx.save();
   ctx.beginPath(); ctx.rect(VX, VY, VVW, VVH); ctx.clip();
   if (G.shake > 0) ctx.translate(rng(-1, 1) * G.shake * 0.7, rng(-1, 1) * G.shake * 0.5);
-  // starfield: fixed distant points in view space
-  srand(0x57a5);
-  ctx.fillStyle = 'rgba(200,220,255,0.7)';
-  for (let i = 0; i < 130; i++) {
-    const dir = norm3(v3(rng(-1, 1), rng(-1, 1), rng(-1, 1)));
-    const v = [dot3(dir, G.right), dot3(dir, G.up), dot3(dir, G.fwd)];
-    if (v[2] < 0.05) continue;
-    const f = 620 / v[2];
-    const x = CX + v[0] * f, y = CY - v[1] * f;
-    if (x < VX || x > VX + VVW || y < VY || y > VY + VVH) continue;
-    const b = rng(0.25, 0.85);
-    ctx.globalAlpha = b;
-    ctx.fillRect(x, y, i % 9 === 0 ? 2 : 1.3, i % 9 === 0 ? 2 : 1.3);
+  // starfield: a wrapping dust volume around the ship — speed you can see
+  if (!G.stars) {
+    G.stars = [];
+    let h = 0x57a5;
+    const r01 = () => { h ^= h << 13; h >>>= 0; h ^= h >> 17; h ^= h << 5; h >>>= 0; return h / 4294967296; };
+    for (let i = 0; i < 340; i++) {
+      G.stars.push({ p: v3((r01() - 0.5) * 9000, (r01() - 0.5) * 9000, (r01() - 0.5) * 9000), b: 0.2 + r01() * 0.7, big: r01() < 0.1 });
+    }
+  }
+  const WRAP = 9000;
+  ctx.lineWidth = 1.2;
+  for (const st of G.stars) {
+    // wrap the dust cube around the ship
+    for (let ax = 0; ax < 3; ax++) {
+      let d = st.p[ax] - G.pos[ax];
+      d = ((d % WRAP) + WRAP * 1.5) % WRAP - WRAP / 2;
+      st.p[ax] = G.pos[ax] + d;
+    }
+    const pr = project(st.p);
+    if (!pr) continue;
+    if (pr[0] < VX || pr[0] > VX + VVW || pr[1] < VY || pr[1] > VY + VVH) continue;
+    const streak = G.speed * 0.05;
+    const prev = project(add3(st.p, mul3(G.fwd, -streak * 4)));
+    ctx.globalAlpha = st.b;
+    if (prev && streak > 3 && Math.hypot(prev[0] - pr[0], prev[1] - pr[1]) > 2) {
+      ctx.strokeStyle = 'rgba(200,220,255,0.7)';
+      ctx.beginPath(); ctx.moveTo(prev[0], prev[1]); ctx.lineTo(pr[0], pr[1]); ctx.stroke();
+    } else {
+      ctx.fillStyle = 'rgba(200,220,255,0.85)';
+      ctx.fillRect(pr[0], pr[1], st.big ? 2.2 : 1.4, st.big ? 2.2 : 1.4);
+    }
   }
   ctx.globalAlpha = 1;
   // the planet: a great ringed disc
@@ -706,14 +777,33 @@ function drawScene() {
   for (const b of G.bolts) {
     const pr = project(b.pos);
     if (!pr) continue;
-    ctx.fillStyle = '#ffd12a';
-    ctx.beginPath(); ctx.arc(pr[0], pr[1], Math.max(1.5, 4 * pr[3] * 90), 0, 7); ctx.fill();
+    const col = b.kind === 'enemy' ? '#ff2e6d' : '#ffd12a';
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const gl2 = ctx.createRadialGradient(pr[0], pr[1], 0, pr[0], pr[1], 10);
+    gl2.addColorStop(0, hexA(col, 0.95)); gl2.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = gl2;
+    ctx.beginPath(); ctx.arc(pr[0], pr[1], 10, 0, 7); ctx.fill();
+    ctx.restore();
   }
   // debris
   for (const p of G.parts) {
+    const k = 1 - p.t / p.life;
+    if (p.kind === 'edge') {
+      p.ang += p.spin * 0.016;
+      const c2 = Math.cos(p.ang), s2 = Math.sin(p.ang);
+      const rot = q2 => v3(q2[0] * c2 - q2[2] * s2, q2[1], q2[0] * s2 + q2[2] * c2);
+      const A = project(add3(p.pos, rot(p.a))), B = project(add3(p.pos, rot(p.b)));
+      if (A && B) {
+        ctx.globalAlpha = k;
+        ctx.strokeStyle = p.color;
+        ctx.lineWidth = 1.3;
+        ctx.beginPath(); ctx.moveTo(A[0], A[1]); ctx.lineTo(B[0], B[1]); ctx.stroke();
+      }
+      continue;
+    }
     const pr = project(p.pos);
     if (!pr) continue;
-    const k = 1 - p.t / p.life;
     ctx.globalAlpha = k;
     ctx.fillStyle = p.color;
     const s = Math.max(1, pr[3] * 160);
@@ -722,16 +812,25 @@ function drawScene() {
   ctx.globalAlpha = 1;
   // laser bolts: twin beams to the crosshair
   if (G.boltFlashT > 0) {
+    const hp2 = G.lastHitPoint ? project(G.lastHitPoint) : null;
+    const tx2 = hp2 ? hp2[0] : CX, ty2 = hp2 ? hp2[1] : CY;
     ctx.save();
     ctx.strokeStyle = hexA('#ff2e6d', 0.9);
     ctx.shadowColor = '#ff2e6d'; ctx.shadowBlur = 8;
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 2.2;
     ctx.beginPath();
-    ctx.moveTo(VX + 40, VY + VVH - 6);
-    ctx.lineTo(CX, CY);
-    ctx.moveTo(VX + VVW - 40, VY + VVH - 6);
-    ctx.lineTo(CX, CY);
+    ctx.moveTo(CX - 130, VY + VVH - 4);
+    ctx.lineTo(tx2, ty2);
+    ctx.moveTo(CX + 130, VY + VVH - 4);
+    ctx.lineTo(tx2, ty2);
     ctx.stroke();
+    if (hp2) {
+      ctx.globalCompositeOperation = 'lighter';
+      const fl = ctx.createRadialGradient(tx2, ty2, 0, tx2, ty2, 18);
+      fl.addColorStop(0, 'rgba(255,255,255,0.95)'); fl.addColorStop(0.5, 'rgba(255,209,42,0.6)'); fl.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = fl;
+      ctx.beginPath(); ctx.arc(tx2, ty2, 18, 0, 7); ctx.fill();
+    }
     ctx.restore();
   }
   // crosshair
@@ -743,9 +842,18 @@ function drawScene() {
   ctx.moveTo(CX, CY - 16); ctx.lineTo(CX, CY - 5);
   ctx.moveTo(CX, CY + 5); ctx.lineTo(CX, CY + 16);
   ctx.stroke();
-  // damage flash
+  // damage flash: the edge that was struck burns brightest
   if (G.flashT > 0) {
-    ctx.fillStyle = `rgba(255,50,60,${G.flashT * 0.9})`;
+    const a3 = G.flashT * 0.9;
+    if (G.hitDir) {
+      const [hx2, hy2] = G.hitDir;
+      const gx = clamp(CX + hx2 * VVW, VX, VX + VVW), gy = clamp(CY - hy2 * VVH, VY, VY + VVH);
+      const eg = ctx.createRadialGradient(gx, gy, 0, gx, gy, VVW * 0.7);
+      eg.addColorStop(0, `rgba(255,50,60,${a3})`); eg.addColorStop(1, 'rgba(255,50,60,0)');
+      ctx.fillStyle = eg;
+    } else {
+      ctx.fillStyle = `rgba(255,50,60,${a3 * 0.5})`;
+    }
     ctx.fillRect(VX, VY, VVW, VVH);
   }
   // hyperspace tunnel
@@ -775,31 +883,52 @@ function drawScanner(hx, hy, hw, hh) {
   ctx.beginPath(); ctx.ellipse(hx, hy, hw * 0.62, hh * 0.62, 0, 0, 7); ctx.stroke();
   ctx.beginPath(); ctx.ellipse(hx, hy, hw * 0.3, hh * 0.3, 0, 0, 7); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(hx - hw, hy); ctx.lineTo(hx + hw, hy); ctx.stroke();
+  // the ship at the center, nose forward
+  ctx.fillStyle = '#e8f4ff';
+  ctx.beginPath(); ctx.moveTo(hx, hy - 6); ctx.lineTo(hx - 4, hy + 4); ctx.lineTo(hx + 4, hy + 4); ctx.closePath(); ctx.fill();
   const R = 9500;
-  const blips = [...G.ships.filter(s => !s.dead).map(s => ({ p: s.pos, col: s.type === 'jackal' ? '#ff2e6d' : s.type === 'warden' ? '#5fd4ff' : '#c9a06b' })),
-    ...(G.station ? [{ p: G.station.pos, col: '#ffd12a' }] : [])];
+  const blips = [...G.ships.filter(s => !s.dead).map(s => ({ p: s.pos, col: s.type === 'jackal' ? '#ff2e6d' : s.type === 'warden' ? '#5fd4ff' : '#c9a06b', ring: false })),
+    ...(G.station ? [{ p: G.station.pos, col: '#ffd12a', ring: true }] : [])];
   for (const b of blips) {
     const v = worldToView(b.p);
     if (Math.abs(v[0]) > R || Math.abs(v[2]) > R) continue;
     const sx = hx + (v[0] / R) * hw;
     const sy = hy - (v[2] / R) * hh;
-    const alt = clamp((v[1] / R) * hh * 2.2, -34, 34);
+    const alt = clamp((v[1] / R) * hh * 3.2, -44, 44);
     ctx.strokeStyle = hexA(b.col, 0.8);
+    ctx.lineWidth = 1.4;
     ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx, sy - alt); ctx.stroke();
-    ctx.fillStyle = b.col;
-    ctx.fillRect(sx - 2, sy - alt - 2, 4, 4);
+    if (b.ring) {
+      ctx.beginPath(); ctx.arc(sx, sy - alt, 4, 0, 7); ctx.stroke();
+    } else {
+      ctx.fillStyle = b.col;
+      ctx.fillRect(sx - 2.2, sy - alt - 2.2, 4.4, 4.4);
+    }
     ctx.fillStyle = hexA(b.col, 0.4);
     ctx.fillRect(sx - 1.5, sy - 1.5, 3, 3);
   }
+  // legend
+  ctx.font = '600 7.5px Verdana, sans-serif';
+  ctx.textAlign = 'left';
+  const leg = [['PIRATE', '#ff2e6d'], ['POLICE', '#5fd4ff'], ['TRADER', '#c9a06b'], ['STATION', '#ffd12a']];
+  leg.forEach(([nm, cl], i) => {
+    ctx.fillStyle = cl;
+    ctx.fillRect(hx - hw + 4, hy - hh + 6 + i * 11, 4, 4);
+    ctx.fillStyle = 'rgba(180,205,235,0.7)';
+    ctx.fillText(nm, hx - hw + 11, hy - hh + 11 + i * 11);
+  });
   ctx.restore();
 }
 function bar(x, y, w, h, k, col) {
   ctx.fillStyle = 'rgba(255,255,255,0.09)';
-  ctx.beginPath(); ctx.roundRect(x, y, w, h, h / 2); ctx.fill();
-  if (k > 0.01) {
+  ctx.fillRect(x, y, w, h);
+  if (k > 0.005) {
     ctx.fillStyle = col;
-    ctx.beginPath(); ctx.roundRect(x, y, Math.max(h, w * clamp(k, 0, 1)), h, h / 2); ctx.fill();
+    ctx.fillRect(x, y, w * clamp(k, 0, 1), h);
   }
+  ctx.strokeStyle = 'rgba(200,220,240,0.25)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
 }
 function label(txt, x, y, align) {
   ctx.font = '700 10px Verdana, sans-serif';
@@ -864,13 +993,16 @@ function drawHUD() {
   label('LEGAL', 950, HY + 110);
   ctx.fillStyle = G.wanted ? '#ff5c5c' : 'rgba(220,240,255,0.9)';
   ctx.fillText(G.wanted ? 'FUGITIVE ' + G.wanted : 'CLEAN', 1050, HY + 111);
-  // messages above HUD
-  ctx.font = '600 12px Verdana, sans-serif';
-  ctx.textAlign = 'center';
-  G.msg.slice(0, 2).forEach((m, i) => {
-    ctx.fillStyle = `rgba(210,232,255,${0.9 - i * 0.35})`;
-    ctx.fillText(m, W / 2, HY - 14 - i * 18);
-  });
+  // messages above HUD — they fade, and they die
+  if (G.msgT > 0) {
+    ctx.font = '600 12px Verdana, sans-serif';
+    ctx.textAlign = 'center';
+    const a2 = Math.min(1, G.msgT);
+    G.msg.slice(0, 2).forEach((m, i) => {
+      ctx.fillStyle = `rgba(210,232,255,${(0.9 - i * 0.35) * a2})`;
+      ctx.fillText(m, W / 2, HY - 14 - i * 18);
+    });
+  }
   // controls strip
   ctx.font = `700 9px ${MONO}`;
   ctx.textAlign = 'left';
@@ -904,6 +1036,24 @@ function drawDocked() {
   ctx.fillStyle = '#05060c';
   ctx.fillRect(VX, VY, VVW, VVH);
   const px = 90, pw = W - 180;
+  // tab bar: the four rooms of the station, plus the door
+  const TABS = [['status', 'STATUS [1]'], ['market', 'MARKET [2]'], ['equip', 'OUTFIT [3]'], ['map', 'CHART [4]'], ['launch', 'LAUNCH [L]']];
+  TABS.forEach(([id, nm], i) => {
+    const tx3 = 90 + i * 224, ty3 = VY + 8, tw3 = 208, th3 = 26;
+    const on = G.screen === id;
+    const hov2 = mouse.x > tx3 && mouse.x < tx3 + tw3 && mouse.y > ty3 && mouse.y < ty3 + th3;
+    ctx.fillStyle = on ? 'rgba(51,214,255,0.18)' : hov2 ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.03)';
+    ctx.strokeStyle = on ? '#33d6ff' : 'rgba(160,195,230,0.35)';
+    ctx.lineWidth = on ? 1.8 : 1;
+    ctx.fillRect(tx3, ty3, tw3, th3);
+    ctx.strokeRect(tx3 + 0.5, ty3 + 0.5, tw3 - 1, th3 - 1);
+    ctx.font = '700 10px Verdana, sans-serif';
+    ctx.letterSpacing = '1px';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = on ? '#ffffff' : 'rgba(190,215,240,0.8)';
+    ctx.fillText(nm, tx3 + tw3 / 2, ty3 + 17);
+    ctx.letterSpacing = '0px';
+  });
   if (G.screen === 'status') {
     // the Kestrel rotating on a plinth
     ctx.save();
@@ -946,7 +1096,7 @@ function drawDocked() {
     ctx.fillText('HELD', px + 420, VY + 82);
     ctx.fillText('BUY [Q-U] · SELL [A-J]', px + 540, VY + 82);
     GOODS.forEach((g, i) => {
-      const y = VY + 112 + i * 44;
+      const y = VY + 124 + i * 44;
       const p = priceOf(g, sys());
       const held = G.cargo[g.name] || 0;
       const hov = mouse.y > y - 18 && mouse.y < y + 12;
@@ -958,9 +1108,10 @@ function drawDocked() {
       ctx.fillText(p + ' cr', px + 300, y);
       ctx.fillStyle = held ? '#5aff9e' : 'rgba(160,195,230,0.5)';
       ctx.fillText(held + 't', px + 420, y);
-      // buy / sell buttons
-      drawBtn(px + 540, y - 17, 90, 26, 'BUY', G.credits >= p && cargoTons() < G.cargoCap);
-      drawBtn(px + 650, y - 17, 90, 26, 'SELL', held > 0);
+      // buy / sell buttons, each wearing its key
+      const bk = ['Q', 'W', 'E', 'R', 'T', 'Y', 'U'][i], sk = ['A', 'S', 'D', 'F', 'G', 'H', 'J'][i];
+      drawBtn(px + 540, y - 17, 90, 26, `BUY [${bk}]`, G.credits >= p && cargoTons() < G.cargoCap);
+      drawBtn(px + 650, y - 17, 90, 26, `SELL [${sk}]`, held > 0);
     });
   } else if (G.screen === 'equip') {
     ctx.font = '900 20px "Arial Black", Arial, sans-serif';
@@ -970,7 +1121,7 @@ function drawDocked() {
     ctx.fillText('SHIPYARD OUTFITTING', W / 2, VY + 44);
     ctx.letterSpacing = '0px';
     EQUIP.forEach((e, i) => {
-      const y = VY + 112 + i * 52;
+      const y = VY + 124 + i * 52;
       const can = e.can();
       const c = e.cost();
       ctx.font = `700 13px ${MONO}`;
@@ -979,7 +1130,7 @@ function drawDocked() {
       ctx.fillText(e.name, px, y);
       ctx.fillStyle = can ? '#ffd12a' : 'rgba(160,170,150,0.5)';
       ctx.fillText(c + ' cr', px + 360, y);
-      drawBtn(px + 520, y - 17, 110, 28, can ? 'INSTALL' : 'OWNED', can && G.credits >= c);
+      drawBtn(px + 520, y - 17, 110, 28, !can ? 'FULL' : G.credits >= c ? 'INSTALL' : 'NEED CR', can && G.credits >= c);
     });
   } else if (G.screen === 'map') {
     drawMap();
@@ -1042,9 +1193,9 @@ function drawMap() {
     }
   }
   ctx.font = `700 9px ${MONO}`;
-  ctx.textAlign = 'center';
-  ctx.fillStyle = 'rgba(150,180,215,0.7)';
-  ctx.fillText('CLICK A STAR TO TARGET · GREEN=AGRI ORANGE=INDUSTRIAL · DASHED RING = FUEL RANGE', W / 2, my + mh + 22);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(150,180,215,0.8)';
+  ctx.fillText('CLICK A STAR · GREEN=AGRI · ORANGE=INDUSTRIAL · RING=FUEL RANGE · J JUMPS', mx + 8, my + 16);
 }
 function drawTitle() {
   ctx.fillStyle = '#05060c';
@@ -1108,14 +1259,14 @@ function draw() {
   if (G.showTitle) { drawTitle(); return; }
   ctx.fillStyle = '#05060c';
   ctx.fillRect(0, 0, W, H);
-  if (G.mode === 'flight' || G.mode === 'dead') drawScene();
+  if (G.mode === 'flight' || G.mode === 'dead' || G.mode === 'dying') drawScene();
   else drawDocked();
   drawTopBar();
-  drawHUD();
+  if (G.mode !== 'dead') drawHUD();
   if (G.mode === 'dead') {
     ctx.fillStyle = 'rgba(4,5,10,0.65)';
     ctx.fillRect(0, 0, W, H);
-    banner('SIGNAL LOST', '#ff5c5c', `RATING ${rankOf(G.kills)} · ${G.kills} KILLS · ${G.credits.toFixed(0)} CR · ${G.stats.jumps} JUMPS`);
+    banner('SIGNAL LOST', '#ff5c5c', `${G.deathWhy || ''} · RATING ${rankOf(G.kills)} · ${G.kills} KILLS · ${G.stats.jumps} JUMPS`);
     bannerButton('NEW COMMANDER · SPACE', '#ff5c5c');
   }
 }
@@ -1171,17 +1322,17 @@ window.addEventListener('keydown', e => {
   if (G.showTitle && (e.key === ' ' || e.key === 'Enter')) { G.showTitle = false; newGame((Math.random() * 1e9) >>> 0, {}); return; }
   if (G.mode === 'dead' && e.key === ' ' && G.modeT > 0.6) { newGame((Math.random() * 1e9) >>> 0, {}); return; }
   if (G.mode === 'docked') {
-    if (k === '1') G.screen = 'status';
-    if (k === '2') G.screen = 'market';
-    if (k === '3') G.screen = 'equip';
-    if (k === '4' || k === 'g') G.screen = 'map';
-    if (k === 'l') launch();
     if (G.screen === 'market') {
       const buyKeys = ['q', 'w', 'e', 'r', 't', 'y', 'u'], sellKeys = ['a', 's', 'd', 'f', 'g', 'h', 'j'];
       const bi = buyKeys.indexOf(k), si = sellKeys.indexOf(k);
-      if (bi >= 0 && bi < GOODS.length) buyGood(bi);
-      if (si >= 0 && si < GOODS.length) sellGood(si);
+      if (bi >= 0 && bi < GOODS.length) { buyGood(bi); return; }
+      if (si >= 0 && si < GOODS.length) { sellGood(si); return; }
     }
+    if (k === '1') G.screen = 'status';
+    if (k === '2') G.screen = 'market';
+    if (k === '3') G.screen = 'equip';
+    if (k === '4') G.screen = 'map';
+    if (k === 'l') launch();
   } else if (G.mode === 'flight') {
     if (k === ' ') fireLaser();
     if (k === 'm') fireMissile();
@@ -1207,9 +1358,17 @@ canvas.addEventListener('mousedown', () => {
   }
   if (G.mode === 'docked') {
     const px = 90;
+    // tabs
+    const TABS2 = ['status', 'market', 'equip', 'map', 'launch'];
+    TABS2.forEach((id, i) => {
+      const tx3 = 90 + i * 224, ty3 = VY + 8;
+      if (mouse.x > tx3 && mouse.x < tx3 + 208 && mouse.y > ty3 && mouse.y < ty3 + 26) {
+        if (id === 'launch') launch(); else G.screen = id;
+      }
+    });
     if (G.screen === 'market') {
       GOODS.forEach((g, i) => {
-        const y = VY + 112 + i * 44;
+        const y = VY + 124 + i * 44;
         if (mouse.y > y - 17 && mouse.y < y + 9) {
           if (mouse.x > px + 540 && mouse.x < px + 630) buyGood(i);
           if (mouse.x > px + 650 && mouse.x < px + 740) sellGood(i);
@@ -1217,7 +1376,7 @@ canvas.addEventListener('mousedown', () => {
       });
     } else if (G.screen === 'equip') {
       EQUIP.forEach((e2, i) => {
-        const y = VY + 112 + i * 52;
+        const y = VY + 124 + i * 52;
         if (mouse.y > y - 17 && mouse.y < y + 11 && mouse.x > px + 520 && mouse.x < px + 630) buyEquip(i);
       });
     } else if (G.screen === 'map') {
@@ -1490,24 +1649,17 @@ function runVerifyInner(mode) {
     G.ships = [];
     spawnShip('jackal'); spawnShip('jackal');
     for (const sh of G.ships) sh.pos = add3(G.pos, mul3(G.fwd, 2600));
-    let minD = 1e9, hits = 0;
-    const sf0 = () => Math.min(G.shieldF, G.shieldA);
-    let lastS = sf0();
-    stepUntil(() => {
-      for (const sh2 of G.ships) if (!sh2.dead) minD = Math.min(minD, len3(sub3(sh2.pos, G.pos)));
-      if (sf0() < lastS - 1) hits++;
-      lastS = sf0();
-      return G.mode === 'dead';
-    }, 60 * 400);
+    stepUntil(() => G.mode === 'dead' || G.mode === 'dying', 60 * 400);
+    stepFor(2);
     outcome = G.mode === 'dead' ? 'LOST' : 'SURVIVED';
-    extra = { hull: Math.ceil(G.hull), shots: G.dbgShots || 0, dmg: Math.round(G.dbgDmg || 0), minSF: Math.round(G.dbgMinSF ?? -1), minSA: Math.round(G.dbgMinSA ?? -1), shieldF: Math.round(G.shieldF), shieldA: Math.round(G.shieldA) };
+    extra = { hull: Math.ceil(G.hull), shieldF: Math.round(G.shieldF), shieldA: Math.round(G.shieldA) };
   } else if (mode === 'dock-aligned' || mode === 'dock-crooked') {
     launch();
     G.ships = [];
     const r = botDock(mode === 'dock-aligned');
     outcome = mode === 'dock-aligned'
       ? (r === 'docked' ? 'DOCKED' : 'FAILED')
-      : (r !== 'docked' && G.stats.scrapes > 0 ? 'REPELLED' : r === 'docked' && G.stats.scrapes === 0 ? 'FAILED' : 'REPELLED');
+      : (r !== 'docked' && G.stats.scrapes > 0 ? 'REPELLED' : 'FAILED');
     extra = { result: r, scrapes: G.stats.scrapes, hull: Math.ceil(G.hull) };
   } else if (mode === 'mech-prices') {
     // the economy's law: food is cheap where it grows, machinery cheap where it is made
