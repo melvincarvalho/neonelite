@@ -30,7 +30,10 @@ function hexA(hex, a) {
 
 // ---------- audio ----------
 let AC = null, AUDIO_ON = true;
-function audio() { if (!AC && AUDIO_ON) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { AUDIO_ON = false; } } }
+function audio() {
+  if (!AC && AUDIO_ON) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { AUDIO_ON = false; } }
+  if (AC && AC.state === 'suspended') AC.resume();   // iOS hands the context over suspended
+}
 function blip(f0, f1, dur, type, vol) {
   if (!AC || !AUDIO_ON) return;
   const t = AC.currentTime;
@@ -1007,9 +1010,13 @@ function drawHUD() {
   ctx.font = `700 9px ${MONO}`;
   ctx.textAlign = 'left';
   ctx.fillStyle = 'rgba(150,180,215,0.7)';
-  ctx.fillText(G.mode === 'flight'
-    ? 'ARROWS PITCH/ROLL · W/S THROTTLE · SPACE LASER · M MISSILE · J JUMP (MAP TARGET) · C DOCK-COMP · G MAP'
-    : '1 STATUS · 2 MARKET · 3 EQUIP · 4 GALAXY MAP · L LAUNCH', 24, H - 6);
+  ctx.fillText(TOUCH
+    ? (G.mode === 'flight'
+      ? 'DRAG THE VOID TO STEER · HOLD FIRE · CHART PICKS A STAR, JUMP GOES THERE'
+      : 'TAP A TAB · TAP BUY / SELL · LAUNCH WHEN READY')
+    : (G.mode === 'flight'
+      ? 'ARROWS PITCH/ROLL · W/S THROTTLE · SPACE LASER · M MISSILE · J JUMP (MAP TARGET) · C DOCK-COMP · G MAP'
+      : '1 STATUS · 2 MARKET · 3 EQUIP · 4 GALAXY MAP · L LAUNCH'), 24, H - 6);
 }
 function drawTopBar() {
   ctx.fillStyle = '#05080f';
@@ -1245,7 +1252,7 @@ function drawTitle() {
   ctx.letterSpacing = '3px';
   ctx.fillStyle = '#ffffff';
   ctx.shadowColor = '#33d6ff'; ctx.shadowBlur = 12;
-  ctx.fillText('PRESS SPACE TO UNDOCK', W / 2, ly + 118);
+  ctx.fillText(TOUCH ? 'TAP TO UNDOCK' : 'PRESS SPACE TO UNDOCK', W / 2, ly + 118);
   ctx.globalAlpha = 1; ctx.shadowBlur = 0;
   ctx.font = '600 13px Verdana, sans-serif';
   ctx.letterSpacing = '3px';
@@ -1256,19 +1263,21 @@ function drawTitle() {
   ctx.letterSpacing = '0px';
 }
 function draw() {
-  if (G.showTitle) { drawTitle(); return; }
+  if (G.showTitle) { drawTitle(); drawRotateHint(); return; }
   ctx.fillStyle = '#05060c';
   ctx.fillRect(0, 0, W, H);
   if (G.mode === 'flight' || G.mode === 'dead' || G.mode === 'dying') drawScene();
   else drawDocked();
   drawTopBar();
   if (G.mode !== 'dead') drawHUD();
+  drawTouchUI();
   if (G.mode === 'dead') {
     ctx.fillStyle = 'rgba(4,5,10,0.65)';
     ctx.fillRect(0, 0, W, H);
     banner('SIGNAL LOST', '#ff5c5c', `${G.deathWhy || ''} · RATING ${rankOf(G.kills)} · ${G.kills} KILLS · ${G.stats.jumps} JUMPS`);
-    bannerButton('NEW COMMANDER · SPACE', '#ff5c5c');
+    bannerButton(TOUCH ? 'NEW COMMANDER · TAP' : 'NEW COMMANDER · SPACE', '#ff5c5c');
   }
+  drawRotateHint();
 }
 function banner(title, color, sub) {
   ctx.save();
@@ -1310,10 +1319,52 @@ function bannerButton(label2, color) {
   ctx.letterSpacing = '0px';
   ctx.restore();
 }
+function drawTouchUI() {
+  if (!TOUCH || !G || G.mode !== 'flight') return;
+  ctx.save();
+  for (const b of touchBtns()) {
+    const held = Object.values(touch.btns).includes(b.id) || (b.id === 'fire' && touch.fire);
+    ctx.fillStyle = held ? 'rgba(51,214,255,0.3)' : 'rgba(51,214,255,0.1)';
+    ctx.strokeStyle = held ? '#33d6ff' : hexA('#33d6ff', 0.55);
+    ctx.lineWidth = held ? 2 : 1.2;
+    ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, 8); ctx.fill(); ctx.stroke();
+    ctx.font = '800 13px Verdana, sans-serif';
+    ctx.letterSpacing = '1px';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = held ? '#ffffff' : 'rgba(220,240,255,0.85)';
+    ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2 + 5);
+    ctx.letterSpacing = '0px';
+  }
+  // the stick, while a finger holds it
+  if (touch.stickId !== -1 && G.screen !== 'map') {
+    ctx.strokeStyle = hexA('#33d6ff', 0.5);
+    ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.arc(touch.sx, touch.sy, STICK_R, 0, 7); ctx.stroke();
+    ctx.fillStyle = hexA('#33d6ff', 0.35);
+    ctx.beginPath(); ctx.arc(touch.sx + touch.dx, touch.sy + touch.dy, 26, 0, 7); ctx.fill();
+  }
+  ctx.restore();
+}
+function drawRotateHint() {
+  if (!TOUCH || window.innerWidth >= window.innerHeight) return;
+  ctx.save();
+  ctx.fillStyle = 'rgba(5,8,15,0.85)';
+  ctx.fillRect(0, H - 40, W, 40);
+  ctx.font = '700 15px Verdana, sans-serif';
+  ctx.letterSpacing = '2px';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd12a';
+  ctx.fillText('ROTATE TO LANDSCAPE — THE COCKPIT IS WIDE', W / 2, H - 14);
+  ctx.letterSpacing = '0px';
+  ctx.restore();
+}
 
 // ---------- input ----------
 const keys = {};
 let mouse = { x: 0, y: 0 };
+const TOUCH = 'ontouchstart' in window
+  || (window.matchMedia && matchMedia('(pointer: coarse)').matches)
+  || /[?&]touch=1/.test(location.search);
 window.addEventListener('keydown', e => {
   const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
   keys[k] = true;
@@ -1342,18 +1393,22 @@ window.addEventListener('keydown', e => {
   }
 });
 window.addEventListener('keyup', e => { keys[e.key.length === 1 ? e.key.toLowerCase() : e.key] = false; });
-canvas.addEventListener('mousemove', e => {
+function canvasXY(cx2, cy2) {
   const r = canvas.getBoundingClientRect();
-  mouse.x = (e.clientX - r.left) * (W / r.width);
-  mouse.y = (e.clientY - r.top) * (H / r.height);
+  return [(cx2 - r.left) * (W / r.width), (cy2 - r.top) * (H / r.height)];
+}
+canvas.addEventListener('mousemove', e => {
+  [mouse.x, mouse.y] = canvasXY(e.clientX, e.clientY);
   canvas.style.cursor = (G && (G.mode === 'docked' || G.mode === 'dead' || G.showTitle)) ? 'pointer' : 'crosshair';
 });
-canvas.addEventListener('mousedown', () => {
+function pressAt(mx2, my2) {
+  mouse.x = mx2; mouse.y = my2;
+  const pad = TOUCH ? 8 : 0;   // fingers are wider than pointers
   audio();
   if (G.showTitle) { G.showTitle = false; newGame((Math.random() * 1e9) >>> 0, {}); return; }
   if (G.mode === 'dead' && G.modeT > 0.6) {
     const bx2 = W / 2 - 150, by2 = H / 2 + 76;
-    if (mouse.x > bx2 && mouse.x < bx2 + 300 && mouse.y > by2 && mouse.y < by2 + 40) newGame((Math.random() * 1e9) >>> 0, {});
+    if (mouse.x > bx2 - pad && mouse.x < bx2 + 300 + pad && mouse.y > by2 - pad && mouse.y < by2 + 40 + pad) newGame((Math.random() * 1e9) >>> 0, {});
     return;
   }
   if (G.mode === 'docked') {
@@ -1362,44 +1417,123 @@ canvas.addEventListener('mousedown', () => {
     const TABS2 = ['status', 'market', 'equip', 'map', 'launch'];
     TABS2.forEach((id, i) => {
       const tx3 = 90 + i * 224, ty3 = VY + 8;
-      if (mouse.x > tx3 && mouse.x < tx3 + 208 && mouse.y > ty3 && mouse.y < ty3 + 26) {
+      if (mouse.x > tx3 && mouse.x < tx3 + 208 && mouse.y > ty3 - pad && mouse.y < ty3 + 26 + pad) {
         if (id === 'launch') launch(); else G.screen = id;
       }
     });
     if (G.screen === 'market') {
       GOODS.forEach((g, i) => {
         const y = VY + 124 + i * 44;
-        if (mouse.y > y - 17 && mouse.y < y + 9) {
-          if (mouse.x > px + 540 && mouse.x < px + 630) buyGood(i);
-          if (mouse.x > px + 650 && mouse.x < px + 740) sellGood(i);
+        if (mouse.y > y - 17 - pad && mouse.y < y + 9 + pad) {
+          if (mouse.x > px + 540 - pad && mouse.x < px + 630 + pad) buyGood(i);
+          if (mouse.x > px + 650 - pad && mouse.x < px + 740 + pad) sellGood(i);
         }
       });
     } else if (G.screen === 'equip') {
       EQUIP.forEach((e2, i) => {
         const y = VY + 124 + i * 52;
-        if (mouse.y > y - 17 && mouse.y < y + 11 && mouse.x > px + 520 && mouse.x < px + 630) buyEquip(i);
+        if (mouse.y > y - 17 - pad && mouse.y < y + 11 + pad && mouse.x > px + 520 - pad && mouse.x < px + 630 + pad) buyEquip(i);
       });
     } else if (G.screen === 'map') {
-      const { mx, my, sx, sy } = mapGeom();
-      let best = null, bd = 20;
-      for (const s of GALAXY) {
-        const d = Math.hypot(mx + s.x * sx - mouse.x, my + s.y * sy - mouse.y);
-        if (d < bd) { bd = d; best = s; }
-      }
-      if (best) { G.mapSel = best.id; blip(600, 750, 0.06, 'sine', 0.05); }
+      mapPick();
     }
   } else if (G.mode === 'flight') {
     if (G.screen === 'map') {
-      const { mx, my, sx, sy } = mapGeom();
-      let best = null, bd = 20;
-      for (const s of GALAXY) {
-        const d = Math.hypot(mx + s.x * sx - mouse.x, my + s.y * sy - mouse.y);
-        if (d < bd) { bd = d; best = s; }
-      }
-      if (best) { G.mapSel = best.id; blip(600, 750, 0.06, 'sine', 0.05); }
+      mapPick();
     } else fireLaser();
   }
+}
+function mapPick() {
+  const { mx, my, sx, sy } = mapGeom();
+  let best = null, bd = TOUCH ? 30 : 20;
+  for (const s of GALAXY) {
+    const d = Math.hypot(mx + s.x * sx - mouse.x, my + s.y * sy - mouse.y);
+    if (d < bd) { bd = d; best = s; }
+  }
+  if (best) { G.mapSel = best.id; blip(600, 750, 0.06, 'sine', 0.05); }
+}
+canvas.addEventListener('mousedown', e => {
+  const [mx2, my2] = canvasXY(e.clientX, e.clientY);
+  pressAt(mx2, my2);
 });
+
+// ---------- touch: the core loop on glass ----------
+// A drag anywhere in the view is the stick (pitch/roll); on-canvas buttons
+// carry throttle, laser, missile, chart and jump. Everything lands on the
+// same input paths the keyboard uses.
+const touch = { stickId: -1, sx: 0, sy: 0, dx: 0, dy: 0, fire: false, fireT: 0, btns: {} };
+const STICK_R = 70;
+function touchBtns() {
+  const b = [
+    { id: 'thr+', x: 1170, y: VY + 12, w: 104, h: 68, label: 'THR +' },
+    { id: 'thr-', x: 1170, y: VY + 88, w: 104, h: 68, label: 'THR −' },
+    { id: 'msl', x: 1170, y: 368, w: 104, h: 68, label: 'MISSILE' },
+    { id: 'fire', x: 1160, y: 446, w: 114, h: 112, label: 'FIRE' },
+    { id: 'map', x: 6, y: VY + 12, w: 96, h: 64, label: 'CHART' },
+    { id: 'jump', x: 6, y: VY + 88, w: 96, h: 64, label: 'JUMP' },
+  ];
+  if (G.hasDockComp) b.push({ id: 'dock', x: 6, y: VY + 164, w: 96, h: 64, label: 'DOCK' });
+  // on the chart only navigation buttons remain — the map needs the room
+  return G.screen === 'map' ? b.filter(x => x.id === 'map' || x.id === 'jump') : b;
+}
+function touchBtnAt(mx2, my2) {
+  for (const b of touchBtns()) {
+    if (mx2 > b.x && mx2 < b.x + b.w && my2 > b.y && my2 < b.y + b.h) return b;
+  }
+  return null;
+}
+function touchBtnDown(id) {
+  if (id === 'fire') { touch.fire = true; touch.fireT = 0; }
+  else if (id === 'thr+') keys.w = true;
+  else if (id === 'thr-') keys.s = true;
+  else if (id === 'msl') fireMissile();
+  else if (id === 'jump') startJump(G.mapSel);
+  else if (id === 'map') G.screen = G.screen === 'map' ? 'status' : 'map';
+  else if (id === 'dock' && G.hasDockComp) { G.autoDockT = 60; say('Docking computer engaged.'); }
+}
+function touchBtnUp(id) {
+  if (id === 'fire') touch.fire = false;
+  else if (id === 'thr+') keys.w = false;
+  else if (id === 'thr-') keys.s = false;
+}
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  audio();
+  for (const t of e.changedTouches) {
+    const [mx2, my2] = canvasXY(t.clientX, t.clientY);
+    if (!G || G.showTitle || G.mode !== 'flight' || G.screen === 'map') {
+      const b = G && G.mode === 'flight' ? touchBtnAt(mx2, my2) : null;
+      if (b) { touch.btns[t.identifier] = b.id; touchBtnDown(b.id); }
+      else pressAt(mx2, my2);
+      continue;
+    }
+    const b = touchBtnAt(mx2, my2);
+    if (b) { touch.btns[t.identifier] = b.id; touchBtnDown(b.id); }
+    else if (touch.stickId === -1 && my2 > VY && my2 < VY + VVH) {
+      touch.stickId = t.identifier;
+      touch.sx = mx2; touch.sy = my2; touch.dx = 0; touch.dy = 0;
+    }
+  }
+}, { passive: false });
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (t.identifier !== touch.stickId) continue;
+    const [mx2, my2] = canvasXY(t.clientX, t.clientY);
+    touch.dx = clamp(mx2 - touch.sx, -STICK_R, STICK_R);
+    touch.dy = clamp(my2 - touch.sy, -STICK_R, STICK_R);
+  }
+}, { passive: false });
+function touchEnd(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (t.identifier === touch.stickId) { touch.stickId = -1; touch.dx = touch.dy = 0; }
+    const id = touch.btns[t.identifier];
+    if (id) { touchBtnUp(id); delete touch.btns[t.identifier]; }
+  }
+}
+canvas.addEventListener('touchend', touchEnd, { passive: false });
+canvas.addEventListener('touchcancel', touchEnd, { passive: false });
 function pollFlightKeys(dt) {
   if (G.mode !== 'flight') return;
   const pitchRate = 1.15, rollRate = 1.9;
@@ -1408,9 +1542,19 @@ function pollFlightKeys(dt) {
   if (keys.ArrowDown) pitch = pitchRate;
   if (keys.ArrowLeft) roll = -rollRate;
   if (keys.ArrowRight) roll = rollRate;
+  // the virtual stick: drag down pulls the nose up, drag right rolls right
+  if (touch.stickId !== -1) {
+    pitch += (touch.dy / STICK_R) * pitchRate;
+    roll += (touch.dx / STICK_R) * rollRate;
+  }
   applyPitchRoll(pitch, roll, dt);
   if (keys.w) G.throttle = clamp(G.throttle + dt * 0.8, 0, 1);
   if (keys.s) G.throttle = clamp(G.throttle - dt * 0.8, 0, 1);
+  // held FIRE autofires; laser heat is still the law
+  if (touch.fire) {
+    touch.fireT -= dt;
+    if (touch.fireT <= 0) { fireLaser(); touch.fireT = 0.14; }
+  }
 }
 
 // ---------- main loop ----------
@@ -1424,7 +1568,7 @@ function frame(t) {
   while (acc >= SIMSTEP && n < 5) { pollFlightKeys(SIMSTEP); sim(SIMSTEP); acc -= SIMSTEP; n++; }
   if (G.mode === 'flight' && G.screen === 'map') {
     ctx.fillStyle = '#05060c'; ctx.fillRect(0, 0, W, H);
-    drawMap(); drawTopBar(); drawHUD();
+    drawMap(); drawTopBar(); drawHUD(); drawTouchUI(); drawRotateHint();
   } else draw();
 }
 
