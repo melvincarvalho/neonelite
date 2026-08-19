@@ -577,6 +577,9 @@ function addBurst(pos, color) {
       color, life: rng(0.5, 1.3), t: 0,
     });
   }
+  // the kill sells itself: a white core flash and an expanding shockwave ring
+  G.parts.push({ kind: 'flash', pos: [...pos], vel: v3(0, 0, 0), color, life: 0.16, t: 0 });
+  G.parts.push({ kind: 'ring', pos: [...pos], vel: v3(0, 0, 0), color, life: 0.6, t: 0 });
 }
 
 // ---------- market / equip ----------
@@ -667,27 +670,103 @@ function sim(dt) {
 }
 
 // ---------- rendering ----------
-function drawWire(hullDef, pos, fwd, up, color, glow) {
+// Wireframe with glow discipline: line weight and brightness are paid for
+// with proximity — near edges burn, far edges whisper.
+function drawWire(hullDef, pos, fwd, up, color, glow, baseAlpha) {
   const right = norm3(cross3(fwd, up));
   const P = [];
   for (const p of hullDef.pts) {
     const world = add3(pos, add3(add3(mul3(right, p[0]), mul3(up, p[1])), mul3(fwd, p[2])));
     P.push(project(world));
   }
+  const bA = baseAlpha === undefined ? 1 : baseAlpha;
   ctx.save();
-  if (glow) { ctx.shadowColor = color; ctx.shadowBlur = 6; }
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 1.4;
-  ctx.beginPath();
+  if (glow) ctx.shadowColor = color;
   for (const [a, b] of hullDef.edges) {
     const A = P[a], B = P[b];
     if (!A || !B) continue;
+    const f = (A[3] + B[3]) / 2;                     // 620/z: big when close
+    ctx.lineWidth = clamp(0.55 + f * 1.15, 0.6, 2.6);
+    if (glow) ctx.shadowBlur = clamp(f * 8, 2, 12);
+    ctx.globalAlpha = bA * clamp(0.34 + f * 1.15, 0.34, 1);
+    ctx.strokeStyle = color;
+    ctx.beginPath();
     ctx.moveTo(A[0], A[1]);
     ctx.lineTo(B[0], B[1]);
+    ctx.stroke();
   }
-  ctx.stroke();
   ctx.restore();
   return P;
+}
+// ---------- the deep sky: infinite-parallax stars and a restrained nebula ----------
+let SKY = null;
+function initSky() {
+  SKY = { neb: [], stars: [] };
+  let h = 0xBEEF;
+  const r01 = () => { h ^= h << 13; h >>>= 0; h ^= h >> 17; h ^= h << 5; h >>>= 0; return h / 4294967296; };
+  const NEB = [['#22307a', '#0a1034'], ['#4a1b5e', '#150a28'], ['#0b4a55', '#062229'], ['#5e1b3a', '#260a16'], ['#2a2470', '#0c0a2e'], ['#124a4a', '#071f22']];
+  for (let i = 0; i < 6; i++) {
+    SKY.neb.push({
+      dir: norm3(v3(r01() * 2 - 1, r01() * 2 - 1, r01() * 2 - 1)),
+      size: 0.6 + r01() * 0.6, a: 0.06 + r01() * 0.045, c: NEB[i],
+    });
+  }
+  // the galaxy itself: a faint band of light arcing the whole sky
+  const bn = norm3(v3(0.3, 0.9, 0.25));
+  const bu = norm3(cross3(bn, v3(1, 0, 0)));
+  const bv = cross3(bn, bu);
+  for (let i = 0; i < 36; i++) {
+    const th = i / 36 * Math.PI * 2;
+    const jit = mul3(bn, (r01() - 0.5) * 0.22);
+    SKY.neb.push({
+      dir: norm3(add3(add3(mul3(bu, Math.cos(th)), mul3(bv, Math.sin(th))), jit)),
+      size: 0.26 + r01() * 0.34, a: 0.042 + r01() * 0.028,
+      c: r01() < 0.5 ? ['#2b3a7e', '#0b1030'] : ['#3a2b6e', '#100b2c'],
+    });
+  }
+  for (let i = 0; i < 260; i++) {
+    SKY.stars.push({
+      dir: norm3(v3(r01() * 2 - 1, r01() * 2 - 1, r01() * 2 - 1)),
+      b: 0.18 + r01() * 0.55, w: r01(),
+    });
+  }
+  // the band is starrier than the rest of the sky
+  for (let i = 0; i < 170; i++) {
+    const th = r01() * Math.PI * 2;
+    const jit = mul3(bn, (r01() - 0.5) * 0.3);
+    SKY.stars.push({
+      dir: norm3(add3(add3(mul3(bu, Math.cos(th)), mul3(bv, Math.sin(th))), jit)),
+      b: 0.12 + r01() * 0.4, w: r01(),
+    });
+  }
+}
+function projDir(d) {
+  const v = [dot3(d, G.right), dot3(d, G.up), dot3(d, G.fwd)];
+  if (v[2] < 0.08) return null;
+  const f = 620 / v[2];
+  return [CX + v[0] * f, CY - v[1] * f, v[2]];
+}
+function drawSky() {
+  if (!SKY) initSky();
+  for (const n of SKY.neb) {
+    const p = projDir(n.dir);
+    if (!p) continue;
+    const r = clamp(n.size * 620 / p[2], 160, 640);
+    const g = ctx.createRadialGradient(p[0], p[1], 0, p[0], p[1], r);
+    g.addColorStop(0, hexA(n.c[0], n.a));
+    g.addColorStop(0.55, hexA(n.c[1], n.a * 0.6));
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(p[0] - r, p[1] - r, r * 2, r * 2);
+  }
+  for (const s of SKY.stars) {
+    const p = projDir(s.dir);
+    if (!p) continue;
+    ctx.globalAlpha = s.b;
+    ctx.fillStyle = s.w < 0.22 ? 'rgba(255,216,176,0.9)' : s.w > 0.78 ? 'rgba(168,196,255,0.9)' : 'rgba(214,228,250,0.9)';
+    ctx.fillRect(p[0], p[1], 1.1, 1.1);
+  }
+  ctx.globalAlpha = 1;
 }
 function drawScene() {
   // deep space
@@ -698,6 +777,8 @@ function drawScene() {
   ctx.save();
   ctx.beginPath(); ctx.rect(VX, VY, VVW, VVH); ctx.clip();
   if (G.shake > 0) ctx.translate(rng(-1, 1) * G.shake * 0.7, rng(-1, 1) * G.shake * 0.5);
+  // the deep sky first: nebulae and fixed stars at infinity
+  drawSky();
   // starfield: a wrapping dust volume around the ship — speed you can see
   if (!G.stars) {
     G.stars = [];
@@ -731,25 +812,36 @@ function drawScene() {
     }
   }
   ctx.globalAlpha = 1;
-  // the planet: a great ringed disc
+  // the planet: a lit world, not a fog — one fixed sun, a bright crescent, a dark limb
   if (G.planet) {
     const pr = project(G.planet.pos);
     if (pr) {
-      const rad = G.planet.r * pr[3] / 1;
       const rr = G.planet.r * 620 / worldToView(G.planet.pos)[2];
+      const SUN = norm3(v3(0.55, 0.4, -0.73));
+      const lx = dot3(SUN, G.right), ly = -dot3(SUN, G.up);
+      const hx2 = pr[0] + lx * rr * 0.45, hy2 = pr[1] + ly * rr * 0.45;
       ctx.save();
-      const pg = ctx.createRadialGradient(pr[0] - rr * 0.3, pr[1] - rr * 0.3, rr * 0.1, pr[0], pr[1], rr);
-      pg.addColorStop(0, 'rgba(80,170,220,0.5)');
-      pg.addColorStop(0.7, 'rgba(30,80,140,0.35)');
-      pg.addColorStop(1, 'rgba(10,30,70,0.15)');
+      // atmosphere halo, faint and wide
+      const ag = ctx.createRadialGradient(pr[0], pr[1], rr * 0.9, pr[0], pr[1], rr * 1.12);
+      ag.addColorStop(0, 'rgba(0,0,0,0)');
+      ag.addColorStop(0.45, hexA('#5fd4ff', 0.16));
+      ag.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = ag;
+      ctx.fillRect(pr[0] - rr * 1.2, pr[1] - rr * 1.2, rr * 2.4, rr * 2.4);
+      // the sphere: dayside highlight falling to a near-black limb
+      const pg = ctx.createRadialGradient(hx2, hy2, rr * 0.04, pr[0], pr[1], rr);
+      pg.addColorStop(0, 'rgba(150,225,255,0.6)');
+      pg.addColorStop(0.32, 'rgba(56,130,196,0.42)');
+      pg.addColorStop(0.7, 'rgba(16,48,100,0.3)');
+      pg.addColorStop(1, 'rgba(4,10,26,0.62)');
       ctx.fillStyle = pg;
       ctx.beginPath(); ctx.arc(pr[0], pr[1], rr, 0, 7); ctx.fill();
-      ctx.strokeStyle = hexA('#5fd4ff', 0.5);
-      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = hexA('#5fd4ff', 0.45);
+      ctx.lineWidth = 1.3;
       ctx.stroke();
-      // latitude rings
-      ctx.strokeStyle = hexA('#5fd4ff', 0.14);
+      // wireframe latitude rings, brighter on the lit side
       for (let i = 1; i <= 3; i++) {
+        ctx.strokeStyle = hexA('#8fe4ff', 0.07 + 0.05 * i);
         ctx.beginPath();
         ctx.ellipse(pr[0], pr[1], rr * 0.92, rr * (0.24 * i), 0, 0, 7);
         ctx.stroke();
@@ -762,12 +854,13 @@ function drawScene() {
     const spin = G.station.spin;
     const sFwd = v3(0, 0, 1);
     const sUp = v3(Math.sin(spin), Math.cos(spin), 0);
-    drawWire({ pts: STATION.pts, edges: STATION.edges.slice(0, 18) }, G.station.pos, sFwd, sUp, hexA('#7fdcff', 0.75), true);
-    // slot edges brighter — the way in
+    drawWire({ pts: STATION.pts, edges: STATION.edges.slice(0, 18) }, G.station.pos, sFwd, sUp, '#7fdcff', true, 0.8);
+    // slot edges brighter — the way in breathes so you can find it
     const slotEdges = STATION.edges.slice(18);
-    drawWire({ pts: STATION.pts, edges: slotEdges }, G.station.pos, sFwd, sUp, '#ffd12a', true);
+    const pulse = 0.72 + 0.28 * Math.sin(G.time * 3.2);
+    drawWire({ pts: STATION.pts, edges: slotEdges }, G.station.pos, sFwd, sUp, '#ffd12a', true, pulse);
   }
-  // ships
+  // ships — hulls with living engines
   for (const sh of G.ships) {
     if (sh.dead) continue;
     const col = sh.hurtT > 0 ? '#ffffff'
@@ -775,18 +868,48 @@ function drawScene() {
       : sh.type === 'warden' ? '#5fd4ff'
       : '#c9a06b';
     drawWire(HULLS[sh.type], sh.pos, sh.fwd, sh.up, col, true);
+    // engine glow at the stern: thrust you can see
+    const stern = project(add3(sh.pos, mul3(sh.fwd, -30)));
+    if (stern) {
+      const eCol = sh.type === 'jackal' ? '#ff5c8a' : sh.type === 'warden' ? '#7fdcff' : '#ffc37a';
+      const flick = 0.7 + 0.3 * Math.sin(G.time * 16 + (sh.id % 97));
+      const er = clamp(stern[3] * 14, 1.5, 26) * flick;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const eg2 = ctx.createRadialGradient(stern[0], stern[1], 0, stern[0], stern[1], er);
+      eg2.addColorStop(0, 'rgba(255,255,255,0.65)');
+      eg2.addColorStop(0.35, hexA(eCol, 0.5));
+      eg2.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = eg2;
+      ctx.beginPath(); ctx.arc(stern[0], stern[1], er, 0, 7); ctx.fill();
+      ctx.restore();
+    }
   }
-  // missiles
+  // bolts and missiles: sized by distance, trailing their motion
   for (const b of G.bolts) {
     const pr = project(b.pos);
     if (!pr) continue;
     const col = b.kind === 'enemy' ? '#ff2e6d' : '#ffd12a';
+    let dir = null;
+    if (b.kind === 'enemy') dir = norm3(sub3(b.aim, b.pos));
+    else { const t = G.ships.find(s2 => s2.id === b.target && !s2.dead); if (t) dir = norm3(sub3(t.pos, b.pos)); }
+    const r = clamp(pr[3] * 16, 3.5, 16);
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    const gl2 = ctx.createRadialGradient(pr[0], pr[1], 0, pr[0], pr[1], 10);
-    gl2.addColorStop(0, hexA(col, 0.95)); gl2.addColorStop(1, 'rgba(0,0,0,0)');
+    if (dir) {
+      const tail = project(sub3(b.pos, mul3(dir, 110)));
+      if (tail) {
+        ctx.strokeStyle = hexA(col, 0.4);
+        ctx.lineWidth = clamp(r * 0.28, 1, 3);
+        ctx.beginPath(); ctx.moveTo(tail[0], tail[1]); ctx.lineTo(pr[0], pr[1]); ctx.stroke();
+      }
+    }
+    const gl2 = ctx.createRadialGradient(pr[0], pr[1], 0, pr[0], pr[1], r);
+    gl2.addColorStop(0, 'rgba(255,255,255,0.9)');
+    gl2.addColorStop(0.35, hexA(col, 0.85));
+    gl2.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = gl2;
-    ctx.beginPath(); ctx.arc(pr[0], pr[1], 10, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(pr[0], pr[1], r, 0, 7); ctx.fill();
     ctx.restore();
   }
   // debris
@@ -807,10 +930,43 @@ function drawScene() {
     }
     const pr = project(p.pos);
     if (!pr) continue;
+    if (p.kind === 'ring') {
+      // expanding shockwave: a wireframe circle that spends itself
+      const wr = clamp((p.t * 620) * pr[3], 2, 400);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = k * 0.8;
+      ctx.strokeStyle = p.color;
+      ctx.lineWidth = clamp(2.4 * k + 0.4, 0.5, 2.8);
+      ctx.beginPath(); ctx.arc(pr[0], pr[1], wr, 0, 7); ctx.stroke();
+      ctx.restore();
+      continue;
+    }
+    if (p.kind === 'flash') {
+      const fr = clamp(pr[3] * 90, 8, 120) * (0.4 + k);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const fg = ctx.createRadialGradient(pr[0], pr[1], 0, pr[0], pr[1], fr);
+      fg.addColorStop(0, `rgba(255,255,255,${0.9 * k})`);
+      fg.addColorStop(0.4, hexA(p.color, 0.5 * k));
+      fg.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = fg;
+      ctx.beginPath(); ctx.arc(pr[0], pr[1], fr, 0, 7); ctx.fill();
+      ctx.restore();
+      continue;
+    }
+    // sparks: small, hot, and honest about their distance
+    const s = clamp(pr[3] * 24, 1, 6);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
     ctx.globalAlpha = k;
-    ctx.fillStyle = p.color;
-    const s = Math.max(1, pr[3] * 160);
-    ctx.fillRect(pr[0] - s / 2, pr[1] - s / 2, s, s);
+    const sg = ctx.createRadialGradient(pr[0], pr[1], 0, pr[0], pr[1], s * 2);
+    sg.addColorStop(0, 'rgba(255,255,255,0.9)');
+    sg.addColorStop(0.4, hexA(p.color, 0.8));
+    sg.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = sg;
+    ctx.beginPath(); ctx.arc(pr[0], pr[1], s * 2, 0, 7); ctx.fill();
+    ctx.restore();
   }
   ctx.globalAlpha = 1;
   // laser bolts: twin beams to the crosshair
@@ -818,15 +974,35 @@ function drawScene() {
     const hp2 = G.lastHitPoint ? project(G.lastHitPoint) : null;
     const tx2 = hp2 ? hp2[0] : CX, ty2 = hp2 ? hp2[1] : CY;
     ctx.save();
-    ctx.strokeStyle = hexA('#ff2e6d', 0.9);
-    ctx.shadowColor = '#ff2e6d'; ctx.shadowBlur = 8;
-    ctx.lineWidth = 2.2;
+    ctx.globalCompositeOperation = 'lighter';
+    // our beam is white heat in a cyan sheath — crimson belongs to the enemy
+    ctx.strokeStyle = hexA('#33d6ff', 0.5);
+    ctx.shadowColor = '#33d6ff'; ctx.shadowBlur = 12;
+    ctx.lineWidth = 5;
     ctx.beginPath();
     ctx.moveTo(CX - 130, VY + VVH - 4);
     ctx.lineTo(tx2, ty2);
     ctx.moveTo(CX + 130, VY + VVH - 4);
     ctx.lineTo(tx2, ty2);
     ctx.stroke();
+    ctx.strokeStyle = 'rgba(240,252,255,0.95)';
+    ctx.shadowBlur = 4;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(CX - 130, VY + VVH - 4);
+    ctx.lineTo(tx2, ty2);
+    ctx.moveTo(CX + 130, VY + VVH - 4);
+    ctx.lineTo(tx2, ty2);
+    ctx.stroke();
+    // muzzle bloom at the hardpoints
+    for (const mxp of [CX - 130, CX + 130]) {
+      const mg = ctx.createRadialGradient(mxp, VY + VVH - 4, 0, mxp, VY + VVH - 4, 16);
+      mg.addColorStop(0, 'rgba(255,255,255,0.85)');
+      mg.addColorStop(0.4, hexA('#33d6ff', 0.55));
+      mg.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = mg;
+      ctx.beginPath(); ctx.arc(mxp, VY + VVH - 4, 16, 0, 7); ctx.fill();
+    }
     if (hp2) {
       ctx.globalCompositeOperation = 'lighter';
       const fl = ctx.createRadialGradient(tx2, ty2, 0, tx2, ty2, 18);
@@ -875,17 +1051,41 @@ function drawScene() {
     ctx.globalAlpha = 1;
   }
   ctx.restore();
+  // cockpit corner brackets frame the canopy
+  ctx.strokeStyle = hexA('#33d6ff', 0.3);
+  ctx.lineWidth = 1.4;
+  const CB = 26, ci = 10;
+  ctx.beginPath();
+  ctx.moveTo(VX + ci, VY + ci + CB); ctx.lineTo(VX + ci, VY + ci); ctx.lineTo(VX + ci + CB, VY + ci);
+  ctx.moveTo(VX + VVW - ci - CB, VY + ci); ctx.lineTo(VX + VVW - ci, VY + ci); ctx.lineTo(VX + VVW - ci, VY + ci + CB);
+  ctx.moveTo(VX + ci, VY + VVH - ci - CB); ctx.lineTo(VX + ci, VY + VVH - ci); ctx.lineTo(VX + ci + CB, VY + VVH - ci);
+  ctx.moveTo(VX + VVW - ci - CB, VY + VVH - ci); ctx.lineTo(VX + VVW - ci, VY + VVH - ci); ctx.lineTo(VX + VVW - ci, VY + VVH - ci - CB);
+  ctx.stroke();
 }
 // ---------- the scanner: canon's 3D radar dish ----------
 function drawScanner(hx, hy, hw, hh) {
   ctx.save();
-  ctx.strokeStyle = hexA('#33d6ff', 0.5);
-  ctx.lineWidth = 1.2;
+  // a dish, not floating ellipses: a soft well of light anchors the radar
+  const wg = ctx.createRadialGradient(hx, hy, 0, hx, hy, hw);
+  wg.addColorStop(0, 'rgba(24,72,96,0.22)');
+  wg.addColorStop(0.7, 'rgba(10,32,48,0.12)');
+  wg.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = wg;
+  ctx.beginPath(); ctx.ellipse(hx, hy, hw, hh, 0, 0, 7); ctx.fill();
+  ctx.strokeStyle = hexA('#33d6ff', 0.6);
+  ctx.shadowColor = '#33d6ff'; ctx.shadowBlur = 6;
+  ctx.lineWidth = 1.3;
   ctx.beginPath(); ctx.ellipse(hx, hy, hw, hh, 0, 0, 7); ctx.stroke();
+  ctx.shadowBlur = 0;
   ctx.strokeStyle = hexA('#33d6ff', 0.2);
   ctx.beginPath(); ctx.ellipse(hx, hy, hw * 0.62, hh * 0.62, 0, 0, 7); ctx.stroke();
   ctx.beginPath(); ctx.ellipse(hx, hy, hw * 0.3, hh * 0.3, 0, 0, 7); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(hx - hw, hy); ctx.lineTo(hx + hw, hy); ctx.stroke();
+  // range ticks along the axis
+  ctx.strokeStyle = hexA('#33d6ff', 0.35);
+  for (const kx of [-0.62, -0.3, 0.3, 0.62]) {
+    ctx.beginPath(); ctx.moveTo(hx + kx * hw, hy - 3); ctx.lineTo(hx + kx * hw, hy + 3); ctx.stroke();
+  }
   // the ship at the center, nose forward
   ctx.fillStyle = '#e8f4ff';
   ctx.beginPath(); ctx.moveTo(hx, hy - 6); ctx.lineTo(hx - 4, hy + 4); ctx.lineTo(hx + 4, hy + 4); ctx.closePath(); ctx.fill();
@@ -910,26 +1110,39 @@ function drawScanner(hx, hy, hw, hh) {
     ctx.fillStyle = hexA(b.col, 0.4);
     ctx.fillRect(sx - 1.5, sy - 1.5, 3, 3);
   }
-  // legend
-  ctx.font = '600 7.5px Verdana, sans-serif';
+  // legend — readable at arm's length
+  ctx.font = '600 9px Verdana, sans-serif';
   ctx.textAlign = 'left';
   const leg = [['PIRATE', '#ff2e6d'], ['POLICE', '#5fd4ff'], ['TRADER', '#c9a06b'], ['STATION', '#ffd12a']];
   leg.forEach(([nm, cl], i) => {
     ctx.fillStyle = cl;
-    ctx.fillRect(hx - hw + 4, hy - hh + 6 + i * 11, 4, 4);
-    ctx.fillStyle = 'rgba(180,205,235,0.7)';
-    ctx.fillText(nm, hx - hw + 11, hy - hh + 11 + i * 11);
+    ctx.fillRect(hx - hw - 4, hy - hh + 8 + i * 13, 5, 5);
+    ctx.fillStyle = 'rgba(190,214,240,0.85)';
+    ctx.fillText(nm, hx - hw + 4, hy - hh + 14 + i * 13);
   });
   ctx.restore();
 }
 function bar(x, y, w, h, k, col) {
-  ctx.fillStyle = 'rgba(255,255,255,0.09)';
+  ctx.fillStyle = 'rgba(255,255,255,0.07)';
   ctx.fillRect(x, y, w, h);
-  if (k > 0.005) {
-    ctx.fillStyle = col;
-    ctx.fillRect(x, y, w * clamp(k, 0, 1), h);
+  const kk = clamp(k, 0, 1);
+  if (kk > 0.005) {
+    const bg2 = ctx.createLinearGradient(x, y, x + w * kk, y);
+    bg2.addColorStop(0, hexA(col.startsWith('#') ? col : '#ffffff', 0.55));
+    bg2.addColorStop(1, col);
+    ctx.fillStyle = bg2;
+    ctx.fillRect(x, y, w * kk, h);
+    // a hot tip on the fill
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = hexA(col.startsWith('#') ? col : '#ffffff', 0.7);
+    ctx.fillRect(x + w * kk - 1.5, y, 1.5, h);
+    ctx.restore();
   }
-  ctx.strokeStyle = 'rgba(200,220,240,0.25)';
+  // quarter ticks keep the eye honest
+  ctx.fillStyle = 'rgba(5,8,15,0.55)';
+  for (const q2 of [0.25, 0.5, 0.75]) ctx.fillRect(x + w * q2, y, 1, h);
+  ctx.strokeStyle = 'rgba(200,220,240,0.28)';
   ctx.lineWidth = 1;
   ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
 }
@@ -943,10 +1156,20 @@ function label(txt, x, y, align) {
 }
 function drawHUD() {
   const HY = H - HUD_H;
-  ctx.fillStyle = '#05080f';
+  const hg = ctx.createLinearGradient(0, HY, 0, H);
+  hg.addColorStop(0, '#070d18');
+  hg.addColorStop(1, '#04070d');
+  ctx.fillStyle = hg;
   ctx.fillRect(0, HY, W, HUD_H);
-  ctx.fillStyle = 'rgba(200,220,240,0.45)';
+  ctx.save();
+  ctx.shadowColor = '#33d6ff'; ctx.shadowBlur = 5;
+  ctx.fillStyle = 'rgba(120,200,240,0.55)';
   ctx.fillRect(0, HY, W, 1.5);
+  ctx.restore();
+  // three instruments, three bays
+  ctx.fillStyle = 'rgba(120,170,215,0.14)';
+  ctx.fillRect(400, HY + 12, 1, HUD_H - 34);
+  ctx.fillRect(880, HY + 12, 1, HUD_H - 34);
   // left: shields, hull, fuel, laser
   label('FORE SHIELD', 24, HY + 22);
   bar(120, HY + 14, 160, 9, G.shieldF / 100, '#5fd4ff');
@@ -963,7 +1186,7 @@ function drawHUD() {
   ctx.textAlign = 'left';
   ctx.fillText(G.fuel.toFixed(1) + ' LY', 288, HY + 102);
   label('SPEED', 24, HY + 122);
-  bar(120, HY + 114, 160, 9, G.speed / 340, '#e8f4ff');
+  bar(120, HY + 114, 160, 9, G.speed / 340, '#9fe8ff');
   // center: the scanner
   drawScanner(W / 2, HY + 76, 170, 52);
   ctx.font = '700 9px Verdana, sans-serif';
@@ -1002,6 +1225,9 @@ function drawHUD() {
     ctx.textAlign = 'center';
     const a2 = Math.min(1, G.msgT);
     G.msg.slice(0, 2).forEach((m, i) => {
+      const tw2 = ctx.measureText(m).width;
+      ctx.fillStyle = `rgba(4,7,13,${0.55 * (1 - i * 0.4) * a2})`;
+      ctx.fillRect(W / 2 - tw2 / 2 - 10, HY - 26 - i * 18, tw2 + 20, 17);
       ctx.fillStyle = `rgba(210,232,255,${(0.9 - i * 0.35) * a2})`;
       ctx.fillText(m, W / 2, HY - 14 - i * 18);
     });
@@ -1019,10 +1245,16 @@ function drawHUD() {
       : '1 STATUS · 2 MARKET · 3 EQUIP · 4 GALAXY MAP · L LAUNCH'), 24, H - 6);
 }
 function drawTopBar() {
-  ctx.fillStyle = '#05080f';
+  const tg = ctx.createLinearGradient(0, 0, 0, MQ);
+  tg.addColorStop(0, '#04070d');
+  tg.addColorStop(1, '#070d18');
+  ctx.fillStyle = tg;
   ctx.fillRect(0, 0, W, MQ);
-  ctx.fillStyle = 'rgba(200,220,240,0.4)';
+  ctx.save();
+  ctx.shadowColor = '#33d6ff'; ctx.shadowBlur = 5;
+  ctx.fillStyle = 'rgba(120,200,240,0.5)';
   ctx.fillRect(0, MQ - 1.5, W, 1.5);
+  ctx.restore();
   const s = sys();
   ctx.font = '700 13px Verdana, sans-serif';
   ctx.letterSpacing = '2px';
@@ -1040,8 +1272,27 @@ function drawTopBar() {
 }
 // ---------- docked screens ----------
 function drawDocked() {
-  ctx.fillStyle = '#05060c';
+  // the room has walls: a low vignette and the station's hex watermark
+  const dg = ctx.createRadialGradient(CX, CY, 60, CX, CY, VVW * 0.62);
+  dg.addColorStop(0, '#081020');
+  dg.addColorStop(0.6, '#060a14');
+  dg.addColorStop(1, '#04050b');
+  ctx.fillStyle = dg;
   ctx.fillRect(VX, VY, VVW, VVH);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(VX, VY, VVW, VVH); ctx.clip();
+  ctx.strokeStyle = hexA('#33d6ff', 0.05);
+  ctx.lineWidth = 2;
+  for (const hr of [210, 320]) {
+    ctx.beginPath();
+    for (let i = 0; i <= 6; i++) {
+      const a4 = i / 6 * Math.PI * 2 + Math.PI / 12;
+      const hxp = CX + Math.cos(a4) * hr, hyp = CY + Math.sin(a4) * hr * 0.92;
+      i ? ctx.lineTo(hxp, hyp) : ctx.moveTo(hxp, hyp);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
   const px = 90, pw = W - 180;
   // tab bar: the four rooms of the station, plus the door
   const TABS = [['status', 'STATUS [1]'], ['market', 'MARKET [2]'], ['equip', 'OUTFIT [3]'], ['map', 'CHART [4]'], ['launch', 'LAUNCH [L]']];
@@ -1070,15 +1321,22 @@ function drawDocked() {
     const up = v3(0, 1, 0);
     const savedPos = G.pos, savedFwd = G.fwd, savedUp = G.up, savedRight = G.right;
     G.pos = v3(0, 0, 0); G.fwd = v3(0, 0, 1); G.up = v3(0, 1, 0); G.right = v3(1, 0, 0);
-    drawWire(HULLS.kestrel, v3(0, -12, 320), fwd, up, '#33d6ff', true);
+    // the plinth: a soft pool of light and two display rings under the hull
+    const py2 = CY + 78;
+    const plg = ctx.createRadialGradient(CX, py2, 0, CX, py2, 190);
+    plg.addColorStop(0, 'rgba(51,214,255,0.1)');
+    plg.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = plg;
+    ctx.beginPath(); ctx.ellipse(CX, py2, 190, 44, 0, 0, 7); ctx.fill();
+    ctx.strokeStyle = hexA('#33d6ff', 0.28);
+    ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.ellipse(CX, py2, 165, 36, 0, 0, 7); ctx.stroke();
+    ctx.strokeStyle = hexA('#33d6ff', 0.12);
+    ctx.beginPath(); ctx.ellipse(CX, py2, 120, 25, 0, 0, 7); ctx.stroke();
+    drawWire(HULLS.kestrel, v3(0, -10, 250), fwd, up, '#33d6ff', true);
     G.pos = savedPos; G.fwd = savedFwd; G.up = savedUp; G.right = savedRight;
     ctx.restore();
-    ctx.font = '900 26px "Arial Black", Arial, sans-serif';
-    ctx.letterSpacing = '4px';
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#e8f4ff';
-    ctx.fillText('KESTREL MK-I', W / 2, VY + 52);
-    ctx.letterSpacing = '0px';
+    screenTitle('KESTREL MK-I', '#e8f4ff', VY + 76, 26);
     ctx.font = `700 12px ${MONO}`;
     ctx.fillStyle = 'rgba(190,215,240,0.85)';
     const lines = [
@@ -1089,25 +1347,23 @@ function drawDocked() {
     ];
     lines.forEach((l, i) => ctx.fillText(l, W / 2, VY + VVH - 96 + i * 20));
   } else if (G.screen === 'market') {
-    ctx.font = '900 20px "Arial Black", Arial, sans-serif';
-    ctx.letterSpacing = '3px';
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#ffd12a';
-    ctx.fillText('COMMODITY MARKET', W / 2, VY + 44);
-    ctx.letterSpacing = '0px';
+    screenTitle('COMMODITY MARKET', '#ffd12a', VY + 64, 20);
     ctx.font = `700 11px ${MONO}`;
     ctx.textAlign = 'left';
     ctx.fillStyle = 'rgba(150,180,215,0.75)';
-    ctx.fillText('COMMODITY', px, VY + 82);
-    ctx.fillText('PRICE', px + 300, VY + 82);
-    ctx.fillText('HELD', px + 420, VY + 82);
-    ctx.fillText('BUY [Q-U] · SELL [A-J]', px + 540, VY + 82);
+    ctx.fillText('COMMODITY', px, VY + 92);
+    ctx.fillText('PRICE', px + 300, VY + 92);
+    ctx.fillText('HELD', px + 420, VY + 92);
+    ctx.fillText('BUY [Q-U] · SELL [A-J]', px + 540, VY + 92);
+    ctx.fillStyle = 'rgba(150,180,215,0.25)';
+    ctx.fillRect(px - 12, VY + 99, pw + 24, 1);
     GOODS.forEach((g, i) => {
       const y = VY + 124 + i * 44;
       const p = priceOf(g, sys());
       const held = G.cargo[g.name] || 0;
       const hov = mouse.y > y - 18 && mouse.y < y + 12;
       if (hov) { ctx.fillStyle = 'rgba(255,255,255,0.05)'; ctx.fillRect(px - 12, y - 22, pw + 24, 38); }
+      if (i) { ctx.fillStyle = 'rgba(150,180,215,0.08)'; ctx.fillRect(px - 12, y - 24, pw + 24, 1); }
       ctx.font = `700 13px ${MONO}`;
       ctx.fillStyle = g.illegal ? '#ff8c9e' : 'rgba(225,240,255,0.95)';
       ctx.fillText(g.name + (g.illegal ? ' ⚠' : ''), px, y);
@@ -1121,16 +1377,12 @@ function drawDocked() {
       drawBtn(px + 650, y - 17, 90, 26, `SELL [${sk}]`, held > 0);
     });
   } else if (G.screen === 'equip') {
-    ctx.font = '900 20px "Arial Black", Arial, sans-serif';
-    ctx.letterSpacing = '3px';
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#5fd4ff';
-    ctx.fillText('SHIPYARD OUTFITTING', W / 2, VY + 44);
-    ctx.letterSpacing = '0px';
+    screenTitle('SHIPYARD OUTFITTING', '#5fd4ff', VY + 64, 20);
     EQUIP.forEach((e, i) => {
       const y = VY + 124 + i * 52;
       const can = e.can();
       const c = e.cost();
+      if (i) { ctx.fillStyle = 'rgba(150,180,215,0.08)'; ctx.fillRect(px - 12, y - 28, pw + 24, 1); }
       ctx.font = `700 13px ${MONO}`;
       ctx.textAlign = 'left';
       ctx.fillStyle = can ? 'rgba(225,240,255,0.95)' : 'rgba(160,195,230,0.4)';
@@ -1143,11 +1395,32 @@ function drawDocked() {
     drawMap();
   }
 }
+function screenTitle(txt, color, y, size) {
+  ctx.font = `900 ${size}px "Arial Black", Arial, sans-serif`;
+  ctx.letterSpacing = '3px';
+  ctx.textAlign = 'center';
+  ctx.save();
+  ctx.shadowColor = color; ctx.shadowBlur = 10;
+  ctx.fillStyle = color;
+  ctx.fillText(txt, W / 2, y);
+  ctx.restore();
+  ctx.letterSpacing = '0px';
+  // a rule with terminals under the title
+  const tw2 = ctx.measureText(txt).width * 0.62 + 40;
+  ctx.fillStyle = hexA(color, 0.35);
+  ctx.fillRect(W / 2 - tw2 / 2, y + 10, tw2, 1);
+  ctx.fillStyle = hexA(color, 0.8);
+  ctx.fillRect(W / 2 - tw2 / 2 - 4, y + 8.5, 4, 4);
+  ctx.fillRect(W / 2 + tw2 / 2, y + 8.5, 4, 4);
+}
 function drawBtn(x, y, w, h, txt, enabled) {
+  ctx.save();
   ctx.fillStyle = enabled ? 'rgba(51,214,255,0.15)' : 'rgba(255,255,255,0.03)';
-  ctx.strokeStyle = enabled ? hexA('#33d6ff', 0.7) : 'rgba(160,195,230,0.2)';
+  ctx.strokeStyle = enabled ? hexA('#33d6ff', 0.75) : 'rgba(160,195,230,0.2)';
   ctx.lineWidth = 1;
+  if (enabled) { ctx.shadowColor = '#33d6ff'; ctx.shadowBlur = 7; }
   ctx.beginPath(); ctx.roundRect(x, y, w, h, 5); ctx.fill(); ctx.stroke();
+  ctx.restore();
   ctx.font = '700 10px Verdana, sans-serif';
   ctx.textAlign = 'center';
   ctx.fillStyle = enabled ? '#e8f4ff' : 'rgba(160,195,230,0.4)';
@@ -1155,19 +1428,32 @@ function drawBtn(x, y, w, h, txt, enabled) {
   ctx.textAlign = 'left';
 }
 function mapGeom() {
-  const mx = 150, my = VY + 40, mw = W - 300, mh = VVH - 80;
+  const mx = 150, my = VY + 58, mw = W - 300, mh = VVH - 96;
   return { mx, my, mw, mh, sx: mw / 500, sy: mh / 320 };
 }
 function drawMap() {
   const { mx, my, mw, mh, sx, sy } = mapGeom();
-  ctx.strokeStyle = 'rgba(160,195,230,0.3)';
+  // the chart is an instrument: faint graticule behind the stars
+  ctx.fillStyle = 'rgba(10,16,30,0.5)';
+  ctx.fillRect(mx, my, mw, mh);
+  ctx.strokeStyle = hexA('#b06bff', 0.07);
   ctx.lineWidth = 1;
+  for (let gx = 1; gx < 8; gx++) {
+    ctx.beginPath(); ctx.moveTo(mx + gx * mw / 8, my); ctx.lineTo(mx + gx * mw / 8, my + mh); ctx.stroke();
+  }
+  for (let gy = 1; gy < 5; gy++) {
+    ctx.beginPath(); ctx.moveTo(mx, my + gy * mh / 5); ctx.lineTo(mx + mw, my + gy * mh / 5); ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(160,195,230,0.3)';
   ctx.strokeRect(mx, my, mw, mh);
   ctx.font = '900 16px "Arial Black", Arial, sans-serif';
   ctx.letterSpacing = '3px';
   ctx.textAlign = 'center';
+  ctx.save();
+  ctx.shadowColor = '#b06bff'; ctx.shadowBlur = 10;
   ctx.fillStyle = '#b06bff';
-  ctx.fillText('GALACTIC CHART', W / 2, VY + 28);
+  ctx.fillText('GALACTIC CHART', W / 2, VY + 50);
+  ctx.restore();
   ctx.letterSpacing = '0px';
   const cur = sys();
   // fuel range ring
@@ -1181,8 +1467,11 @@ function drawMap() {
     const x = mx + s.x * sx, y = my + s.y * sy;
     const here = s.id === G.sysId, sel = s.id === G.mapSel;
     const inRange = distLY(cur, s) <= G.fuel;
+    ctx.save();
+    if (here || sel) { ctx.shadowColor = here ? '#5aff9e' : '#ffffff'; ctx.shadowBlur = 8; }
     ctx.fillStyle = here ? '#5aff9e' : s.economy < 0.35 ? hexA('#5aff9e', 0.7) : s.economy > 0.65 ? hexA('#ff8c42', 0.75) : 'rgba(200,220,255,0.7)';
     ctx.beginPath(); ctx.arc(x, y, here ? 5 : 3.2, 0, 7); ctx.fill();
+    ctx.restore();
     if (sel) {
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 1.4;
@@ -1205,26 +1494,32 @@ function drawMap() {
   ctx.fillText('CLICK A STAR · GREEN=AGRI · ORANGE=INDUSTRIAL · RING=FUEL RANGE · J JUMPS', mx + 8, my + 16);
 }
 function drawTitle() {
-  ctx.fillStyle = '#05060c';
+  ctx.fillStyle = '#04050b';
   ctx.fillRect(0, 0, W, H);
-  // a jackal prowls behind the title
+  // deep sky and drifting dust behind everything
   ctx.save();
   ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
   const t = G.time * 0.4;
   G.pos = v3(0, 0, 0); G.fwd = v3(0, 0, 1); G.up = v3(0, 1, 0); G.right = v3(1, 0, 0);
-  srand(0x57a5);
+  drawSky();
+  let dh = 0x1CE;
+  const d01 = () => { dh ^= dh << 13; dh >>>= 0; dh ^= dh >> 17; dh ^= dh << 5; dh >>>= 0; return dh / 4294967296; };
   ctx.fillStyle = 'rgba(200,220,255,0.5)';
-  for (let i = 0; i < 110; i++) {
-    ctx.globalAlpha = rng(0.15, 0.7);
-    ctx.fillRect(rng(0, W), rng(0, H), 1.4, 1.4);
+  for (let i = 0; i < 130; i++) {
+    ctx.globalAlpha = 0.15 + d01() * 0.55;
+    ctx.fillRect(d01() * W, d01() * H, 1.4, 1.4);
   }
-  ctx.globalAlpha = 0.75;
-  drawWire(HULLS.jackal, v3(Math.sin(t) * 120, -40 + Math.cos(t * 0.7) * 40, 420), norm3(v3(Math.cos(t), 0.3, Math.sin(t))), v3(0, 1, 0), '#ff2e6d', true);
-  drawWire(HULLS.kestrel, v3(-Math.sin(t) * 160, 60, 520), norm3(v3(-Math.cos(t * 0.8), -0.2, Math.sin(t * 0.8))), v3(0, 1, 0), '#33d6ff', true);
   ctx.globalAlpha = 1;
+  // the duel prowls in open sky — kestrel above the band, jackal below it
+  drawWire(HULLS.kestrel, v3(-Math.sin(t * 0.8) * 200, 185 + Math.cos(t * 0.6) * 22, 520), norm3(v3(-Math.cos(t * 0.8), -0.2, Math.sin(t * 0.8))), v3(0, 1, 0), '#33d6ff', true);
+  drawWire(HULLS.jackal, v3(Math.sin(t) * 150, -218 + Math.cos(t * 0.7) * 16, 420), norm3(v3(Math.cos(t), 0.3, Math.sin(t))), v3(0, 1, 0), '#ff2e6d', true);
   ctx.restore();
   const by = 108, bh = 310;
-  ctx.fillStyle = 'rgba(5,8,15,0.88)';
+  const bg2 = ctx.createLinearGradient(0, by, 0, by + bh);
+  bg2.addColorStop(0, 'rgba(6,10,20,0.94)');
+  bg2.addColorStop(0.5, 'rgba(4,7,14,0.86)');
+  bg2.addColorStop(1, 'rgba(6,10,20,0.94)');
+  ctx.fillStyle = bg2;
   ctx.fillRect(0, by, W, bh);
   ctx.save();
   ctx.shadowColor = '#33d6ff'; ctx.shadowBlur = 9;
@@ -1237,10 +1532,14 @@ function drawTitle() {
   ctx.font = '900 92px "Arial Black", Arial, sans-serif';
   ctx.letterSpacing = '10px';
   ctx.save();
-  ctx.shadowColor = '#33d6ff'; ctx.shadowBlur = 18;
-  ctx.fillStyle = '#7fdcff'; ctx.fillText('NEON ELITE', W / 2, ly);
-  ctx.shadowBlur = 4;
-  ctx.fillStyle = '#ffffff'; ctx.fillText('NEON ELITE', W / 2, ly);
+  // chromatic split: magenta and cyan ghosts under a white-hot core
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.fillStyle = 'rgba(255,46,109,0.5)'; ctx.fillText('NEON ELITE', W / 2 - 3.5, ly);
+  ctx.fillStyle = 'rgba(51,214,255,0.55)'; ctx.fillText('NEON ELITE', W / 2 + 3.5, ly);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.shadowColor = '#33d6ff'; ctx.shadowBlur = 20;
+  ctx.fillStyle = '#dff6ff'; ctx.fillText('NEON ELITE', W / 2, ly);
+  ctx.shadowBlur = 0;
   ctx.restore();
   ctx.letterSpacing = '5px';
   ctx.font = '600 17px Verdana, sans-serif';
@@ -1274,7 +1573,7 @@ function draw() {
   if (G.mode === 'dead') {
     ctx.fillStyle = 'rgba(4,5,10,0.65)';
     ctx.fillRect(0, 0, W, H);
-    banner('SIGNAL LOST', '#ff5c5c', `${G.deathWhy || ''} · RATING ${rankOf(G.kills)} · ${G.kills} KILLS · ${G.stats.jumps} JUMPS`);
+    banner('SIGNAL LOST', '#ff5c5c', [G.deathWhy, `RATING ${rankOf(G.kills)}`, `${G.kills} KILLS`, `${G.stats.jumps} JUMPS`].filter(Boolean).join(' · '));
     bannerButton(TOUCH ? 'NEW COMMANDER · TAP' : 'NEW COMMANDER · SPACE', '#ff5c5c');
   }
   drawRotateHint();
@@ -1324,10 +1623,15 @@ function drawTouchUI() {
   ctx.save();
   for (const b of touchBtns()) {
     const held = Object.values(touch.btns).includes(b.id) || (b.id === 'fire' && touch.fire);
+    ctx.save();
+    ctx.fillStyle = 'rgba(4,8,16,0.5)';
+    ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, 8); ctx.fill();
+    if (held) { ctx.shadowColor = '#33d6ff'; ctx.shadowBlur = 10; }
     ctx.fillStyle = held ? 'rgba(51,214,255,0.3)' : 'rgba(51,214,255,0.1)';
     ctx.strokeStyle = held ? '#33d6ff' : hexA('#33d6ff', 0.55);
     ctx.lineWidth = held ? 2 : 1.2;
     ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, 8); ctx.fill(); ctx.stroke();
+    ctx.restore();
     ctx.font = '800 13px Verdana, sans-serif';
     ctx.letterSpacing = '1px';
     ctx.textAlign = 'center';
